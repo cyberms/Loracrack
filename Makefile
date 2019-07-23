@@ -1,4 +1,4 @@
-# Can be used to link to custom openssl 1.0.* location
+# Insert the path of an openssl 1.0.* version. This path corresponds to a Linux installation
 openssl_include = -L/usr/local/ssl/lib -I/usr/local/ssl/include
 # Helper functions
 helpers_include = includes/*.c
