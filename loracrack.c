@@ -8,7 +8,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <pthread.h>
-
+#include<stdlib.h>
 #include <openssl/cmac.h>
 
 #include "headers/loracrack.h"
@@ -30,25 +30,28 @@ unsigned char *AppKey;
 unsigned char *packet;
 unsigned char MIC[4];
 unsigned char *MIC_data;
+unsigned short dev_nonce = 0;
+bool dev_nonce_given = false;
+unsigned int net_id = 0;
 
 size_t MIC_data_len = 0;
 
 
 int main (int argc, char **argv)
 {
-	char *AppKey_hex = NULL, *packet_hex= NULL;
+	char *AppKey_hex = NULL, *packet_hex= NULL, *net_id_hex= NULL;
 
 	// Set number of threads
 	// Intel(R) Core(TM) i5-7360U
 	// See https://ark.intel.com/products/97535/Intel-Core-i5-7360U-Processor-4M-Cache-up-to-3-60-GHz-
-	unsigned int n_threads = 4;
+	unsigned int n_threads = 2;
 
 	// Set max App Nonce (<=16777216)
 	unsigned int max_AppNonce = 16777216/10000; 
 
 	// Process args
 	int c;
-	while ((c = getopt (argc, argv, "v:p:k:t:m:")) != -1) 
+	while ((c = getopt (argc, argv, "v:p:k:t:m:n:i:")) != -1) 
 	{
 		switch (c)
 		{
@@ -67,6 +70,13 @@ int main (int argc, char **argv)
 			case 'm':
 				max_AppNonce = atoi(optarg);
 				break;
+			case 'n':
+				dev_nonce = atoi(optarg);
+				dev_nonce_given = true;
+				break;
+			case 'i':
+				net_id_hex = optarg;
+				break;
 		}
 	}
 	if (AppKey_hex == NULL || packet_hex == NULL)
@@ -75,9 +85,22 @@ int main (int argc, char **argv)
 			\nExample: \
 			\n\t./loracrack -k 88888888888888888888888888888888 -p 400267bd018005000142d9f48c52ea717c57 \n");
 
+
 	// Validate input - General
 	validate_hex_input(AppKey_hex);
 	validate_hex_input(packet_hex);
+	
+	// If net ID given, do some checks and get the value
+	if (net_id_hex != NULL){
+		validate_hex_input(net_id_hex);
+		
+		size_t net_id_len = strlen(net_id_hex) / 2;
+		if ( net_id_len != 3)
+			error_die("Net ID must be 3 bytes in hex format");
+
+		// Convert hex to int 
+		net_id = (int)strtol(net_id_hex, NULL, 16);
+	}
 
 	// Store data length
 	size_t AppKey_len = strlen(AppKey_hex) / 2;
@@ -88,6 +111,11 @@ int main (int argc, char **argv)
 		error_die("AppKey must be 16 bytes");
 	if (packet_len <= 13)
 		error_die("Packet data too small");
+
+	if (dev_nonce_given){
+		if (dev_nonce < 0 || dev_nonce > 65535)
+			error_die("Dev Nonce must be between 0 and 65,535");
+	}
 
 	// Convert to binary
 	AppKey = hexstr_to_char(AppKey_hex);
@@ -202,7 +230,7 @@ int main (int argc, char **argv)
 		thread_args->AppNonce_end = (i*per_thread)+per_thread;
 
 		// NetID zero for now
-		thread_args->NetID_start = 0;
+		thread_args->NetID_start = net_id;
 		// thread_args->NetID_end = 0;
 
 		// Create thread
@@ -244,7 +272,7 @@ void *loracrack_thread(void *vargp)
 	// unsigned int NetID_end = ((struct thread_args*)vargp)->NetID_end;
 
 	// 2 byte integer
-	unsigned short DevNonce = 0;
+	unsigned short DevNonce=0;
 
 	if (verbose)
 		printf("Thread %i cracking from AppNonce %i to %i\n", thread_ID, AppNonce_current, AppNonce_end);
@@ -267,15 +295,19 @@ void *loracrack_thread(void *vargp)
 	message[4] = (NetID_start >> (8*0)) & 0xff;
 	message[5] = (NetID_start >> (8*1)) & 0xff;
 	message[6] = (NetID_start >> (8*2)) & 0xff;
-	message[7] = (DevNonce >> (8*1)) & 0xff; // Reversed?
-	message[8] = (DevNonce >> (8*0)) & 0xff;
+	message[7] = (DevNonce >> (8*0)) & 0xff; // Reversed?
+	message[8] = (DevNonce >> (8*1)) & 0xff;
 
 	EVP_EncryptInit_ex(&ctx_aes128_buf, EVP_aes_128_ecb(), NULL, AppKey, NULL);
 
 	// AppNonce_end is exclusive
 	while (AppNonce_current < AppNonce_end && !cracked) 
-	{
-		DevNonce = 0;
+	{	
+		
+		if (dev_nonce_given)
+			DevNonce = dev_nonce;
+		else
+			DevNonce = 0;
 
 		if (verbose == 2)
 			printf("Thread %i @ AppNonce %i\n", thread_ID, AppNonce_current);
@@ -287,10 +319,9 @@ void *loracrack_thread(void *vargp)
 
 		while (DevNonce < 0xffff) 
 		{
-
 			// Update DevNonce in message
-			message[7] = (DevNonce >> (8*1)) & 0xff; // Reversed?
-			message[8] = (DevNonce >> (8*0)) & 0xff;
+			message[7] = (DevNonce >> (8*0)) & 0xff; // Reversed?
+			message[8] = (DevNonce >> (8*1)) & 0xff;
 
 			// NwkSKey = aes128_ecb(AppKey, message)
 			// copy init state instead of calling EVP_EncryptInit_ex every time
@@ -305,15 +336,15 @@ void *loracrack_thread(void *vargp)
 			// Check if MIC matches MIC from packet
 			if (memcmp(cmac_result, MIC, 4) == 0) 
 			{
-
+				
 				// cracked is used by multiple threads
-				pthread_mutex_lock(&mutex);
-				cracked = true;
-				pthread_mutex_unlock(&mutex);
+				// pthread_mutex_lock(&mutex);
+				// cracked = true;
+				// pthread_mutex_unlock(&mutex);
 
 				// Output cracked results
 				if (verbose)
-					printf("\nOh dear lawd it's the same\n\n");
+					printf("\nFound a pair of possible session keys\n");
 
 				unsigned char AppSKey[16];
 				
@@ -333,18 +364,24 @@ void *loracrack_thread(void *vargp)
 				
 				if (verbose)
 				{
-					printf("\nAppNonce,%x\n", AppNonce_current);
-					printf("DevNonce,%x\n", DevNonce);
+					printf("\nAppNonce,%x (%d)\n", AppNonce_current, AppNonce_current);
+					printf("DevNonce,%x (%d)\n", DevNonce, DevNonce);
 				}
 
 				// Clean aes data
-				EVP_CIPHER_CTX_cleanup(&ctx_aes128);
-				CMAC_CTX_free(ctx_aes128_cmac);
+				// EVP_CIPHER_CTX_cleanup(&ctx_aes128);
+				// CMAC_CTX_free(ctx_aes128_cmac);
 
+				//break;
+
+				message[0] = 0x01;
+			}
+			if (dev_nonce_given){
 				break;
 			}
-
-			DevNonce += 1;
+			else{
+				DevNonce += 1;
+			}
 
 		}
 		AppNonce_current += 1;
