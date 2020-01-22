@@ -9,8 +9,9 @@
 #include <stdbool.h>
 #include <pthread.h>
 #include<stdlib.h>
+#include<stdint.h>
 #include <openssl/cmac.h>
-
+#include <unistd.h>
 #include "headers/loracrack.h"
 
 
@@ -20,6 +21,84 @@
 
 
 int verbose = 0;
+
+static char encoding_table[] = {'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
+                                'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
+                                'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
+                                'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f',
+                                'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n',
+                                'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
+                                'w', 'x', 'y', 'z', '0', '1', '2', '3',
+                                '4', '5', '6', '7', '8', '9', '+', '/'};
+static char *decoding_table = NULL;
+static int mod_table[] = {0, 2, 1};
+
+void build_decoding_table() {
+ 
+    decoding_table = malloc(256);
+ 
+    for (int i = 0; i < 64; i++)
+        decoding_table[(unsigned char) encoding_table[i]] = i;
+}
+
+void base64_cleanup() {
+    free(decoding_table);
+}
+
+char *base64_decode(const char *data,
+                             size_t input_length,
+                             size_t *output_length) {
+    if (decoding_table == NULL) build_decoding_table();
+ 
+    if (input_length % 4 != 0) return NULL;
+ 
+    *output_length = input_length / 4 * 3;
+    if (data[input_length - 1] == '=') (*output_length)--;
+    if (data[input_length - 2] == '=') (*output_length)--;
+ 
+    unsigned char *decoded_data = malloc(*output_length);
+    if (decoded_data == NULL) return NULL;
+	
+    for (int i = 0, j = 0; i < input_length;) {
+ 
+        uint32_t sextet_a = data[i] == '=' ? 0 & i++ : decoding_table[data[i++]];
+        uint32_t sextet_b = data[i] == '=' ? 0 & i++ : decoding_table[data[i++]];
+        uint32_t sextet_c = data[i] == '=' ? 0 & i++ : decoding_table[data[i++]];
+        uint32_t sextet_d = data[i] == '=' ? 0 & i++ : decoding_table[data[i++]];
+ 
+        uint32_t triple = (sextet_a << 3 * 6)
+        + (sextet_b << 2 * 6)
+        + (sextet_c << 1 * 6)
+        + (sextet_d << 0 * 6);
+ 
+        if (j < *output_length) decoded_data[j++] = (triple >> 2 * 8) & 0xFF;
+        if (j < *output_length) decoded_data[j++] = (triple >> 1 * 8) & 0xFF;
+        if (j < *output_length) decoded_data[j++] = (triple >> 0 * 8) & 0xFF;
+    }
+	
+	//fprintf(stderr,"Returning from B64 Decode\n");
+    return decoded_data;
+}
+
+//function to convert ascii char[] to hex-string (char[])
+char *string2hexString(unsigned char* input, size_t input_len){
+    //fprintf(stderr,"string2hexString called\n");
+ 
+	
+	char *buffer = malloc(input_len*2 + 1);
+	//insert NULL at the end of the output string
+	buffer[input_len*2]='\0';
+
+	//fprintf(stderr,"Input len: %ld\n", input_len);
+	//fprintf(stderr,"Buffer len: %d\n", input_len*2 + 1);
+    
+	for(int i=0; i < input_len; i++){
+		//printf(" i: %d:, %02X\n", i, input[i]);
+		sprintf(&buffer[2*i], "%02X", input[i]);
+    }
+
+	return buffer;
+}
 
 // Variables shared among threads
 volatile bool cracked = false;
@@ -32,22 +111,22 @@ unsigned char MIC[4];
 unsigned char *MIC_data;
 unsigned short dev_nonce = 0;
 bool dev_nonce_given = false;
-unsigned int net_id = 0;
+unsigned int net_id = 19;
 
 size_t MIC_data_len = 0;
 
 
 int main (int argc, char **argv)
 {
-	char *AppKey_hex = NULL, *packet_hex= NULL, *net_id_hex= NULL;
+	char *AppKey_hex = NULL, *packet_b64= NULL, *net_id_hex= NULL;
 
 	// Set number of threads
 	// Intel(R) Core(TM) i5-7360U
 	// See https://ark.intel.com/products/97535/Intel-Core-i5-7360U-Processor-4M-Cache-up-to-3-60-GHz-
-	unsigned int n_threads = 2;
+	unsigned int n_threads = 1;
 
 	// Set max App Nonce (<=16777216)
-	unsigned int max_AppNonce = 16777216/10000; 
+	unsigned int max_AppNonce = 16777216; 
 
 	// Process args
 	int c;
@@ -59,7 +138,7 @@ int main (int argc, char **argv)
 				AppKey_hex = optarg;
 				break;
 			case 'p':
-				packet_hex = optarg;
+				packet_b64 = optarg;
 				break;
 			case 'v':
 				verbose = atoi(optarg);
@@ -79,12 +158,26 @@ int main (int argc, char **argv)
 				break;
 		}
 	}
-	if (AppKey_hex == NULL || packet_hex == NULL)
+	if (AppKey_hex == NULL || packet_b64 == NULL)
 		error_die("Usage: \
-			\n\t./loracrack -k <AppKey in hex> -p <raw_packet in hex> \
+			\n\t./loracrack -k <AppKey in hex> -p <raw_packet in B64> \
 			\nExample: \
-			\n\t./loracrack -k 88888888888888888888888888888888 -p 400267bd018005000142d9f48c52ea717c57 \n");
+			\n\t./loracrack -k 88888888888888888888888888888888 -p QCopAiaAAAACkr0hb+tF4e89tcbVAUCD \n");
 
+	// Convert B64 packet to bytes
+	size_t b64_len= strlen(packet_b64);
+
+	//printf("B64 packet is %s, len %ld\n", packet_b64, b64_len);
+
+
+	size_t bytes_len;
+	unsigned char *bytes = base64_decode(packet_b64, b64_len, &bytes_len);
+
+	//fprintf(stderr,"After returned bytes_len: %ld\n", bytes_len );
+
+	char *packet_hex= string2hexString(bytes, bytes_len);
+
+	//printf("Hex str len %ld, Hex str %s\n", strlen(packet_hex), packet_hex);
 
 	// Validate input - General
 	validate_hex_input(AppKey_hex);
@@ -110,7 +203,7 @@ int main (int argc, char **argv)
 	if (AppKey_len != 16)
 		error_die("AppKey must be 16 bytes");
 	if (packet_len <= 13)
-		error_die("Packet data too small");
+		printf("Packet data too small");
 
 	if (dev_nonce_given){
 		if (dev_nonce < 0 || dev_nonce > 65535)
