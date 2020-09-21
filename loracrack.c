@@ -160,7 +160,7 @@ int main (int argc, char **argv)
 	}
 	if (AppKey_hex == NULL || packet_b64 == NULL)
 		error_die("Usage: \
-			\n\t./loracrack -k <AppKey in hex> -p <raw_packet in B64> \
+			\n\t./loracrack -k <AppKey in hex> -p <B64 PHYPayload Data Packet> [-t <threads number> -m <max AppNonce> -n <DevNonce> -v <1,2 for verbose/ very verbose>]\
 			\nExample: \
 			\n\t./loracrack -k 88888888888888888888888888888888 -p QCopAiaAAAACkr0hb+tF4e89tcbVAUCD \n");
 
